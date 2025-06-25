@@ -113,31 +113,73 @@ def _add_equal_weights(df: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(result_list, ignore_index=True)
 
 
-def _generate_xse_quantities(df: pd.DataFrame) -> pd.DataFrame:
+# _generate_xse_quantities has been replaced by the more general _generate_equalised_quantities function
+
+
+def _add_ts_equal_weights(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Use live *shares-per-weight* ratios (forward-filled, never look-ahead)
-    to compute share quantities that correspond to the new XSE weights.
-    Adds a `quantity_xse` column and returns the tidy DataFrame.
-    This is the core of the XSE calculation.
+    For every trading day, give all the non-zero positions (long / short)
+    the same absolute weight  k_t = 1 / N_t  (N_t := # active positions that day).
+    The original sign is preserved and dupes are aggregated first.
     """
+    df_clean = (
+        df.groupby(['date', 'assetId'], as_index=False)
+          .agg({'quantity': 'sum', 'w_live': 'sum'})
+    )
+
+    out_rows: list[pd.DataFrame] = []
+    for _, day_df in df_clean.groupby('date'):
+        day_df = day_df.copy()
+        n_active = len(day_df)
+        if n_active == 0:
+            continue
+
+        k = 1.0 / n_active
+        day_df['w_xstse'] = np.sign(day_df['w_live']) * k
+        out_rows.append(day_df)
+
+    return pd.concat(out_rows, ignore_index=True)
+
+
+def _generate_equalised_quantities(df: pd.DataFrame, weight_col: str) -> pd.DataFrame:
+    """
+    `weight_col` tells us which equalised-weight column to use
+    (either 'w_xse' or 'w_xstse').
+    """
+    if weight_col not in df.columns:
+        raise MqError(f'Column {weight_col} not found in DataFrame')
+
+    df = df.copy()
     df['spw'] = df['quantity'] / df['w_live'].replace(0, np.nan)
 
-    spw_wide = (df.pivot(index='assetId', columns='date', values='spw')
-                  .sort_index(axis=1)
-                  .ffill(axis=1))
+    # 1) shares‑per‑weight matrix (forward filled ⇒ no look‑ahead)
+    spw_wide = (
+        df.pivot(index='assetId', columns='date', values='spw')
+          .sort_index(axis=1)
+          .ffill(axis=1)
+    )
 
-    w_wide = (df.pivot(index='assetId', columns='date', values='w_xse')
-                .sort_index(axis=1)
-                .fillna(0.0))
+    # 2) target weights matrix
+    w_wide = (
+        df.pivot(index='assetId', columns='date', values=weight_col)
+          .sort_index(axis=1)
+          .fillna(0.0)
+    )
 
-    qty_wide = (w_wide * spw_wide).where(w_wide != 0, 0).round().astype(int).fillna(0)
+    # 3) target shares  =  weight × (shares / weight)_live
+    qty_wide = (w_wide * spw_wide).where(w_wide != 0, 0)
+    qty_wide = qty_wide.round().astype(int).fillna(0)
 
     # back to long form
-    qty_long = qty_wide.stack().rename('quantity_xse').reset_index()
-    out = (df[['date', 'assetId', 'w_xse']]
-           .drop_duplicates(subset=['date', 'assetId'])
-           .merge(qty_long, on=['assetId', 'date'], how='left'))
-    return out.rename(columns={'w_xse': 'weight', 'quantity_xse': 'quantity'})
+    qty_long = qty_wide.stack().rename('quantity_eq').reset_index()
+
+    tidy = (
+        df[['date', 'assetId', weight_col]]
+        .drop_duplicates(subset=['date', 'assetId'])
+        .merge(qty_long, on=['assetId', 'date'], how='left')
+        .rename(columns={weight_col: 'weight', 'quantity_eq': 'quantity'})
+    )
+    return tidy
 
 
 def _build_position_sets(tidy: pd.DataFrame) -> List[PositionSet]:
@@ -209,9 +251,75 @@ def get_xse_portfolio(
     # BUILD XSE PORTFOLIO
     live_df = _pull_constituents_for_date_range(pm, start_date, end_date)
     live_df = _add_equal_weights(live_df)
-    equalised_df = _generate_xse_quantities(live_df)
+    equalised_df = _generate_equalised_quantities(live_df, weight_col='w_xse')
 
     # FORMAT OUTPUT
+    if position_sets:
+        return _build_position_sets(equalised_df)
+
+    if return_format == ReturnFormat.DATA_FRAME:
+        return equalised_df.reset_index(drop=True)
+
+    if return_format == ReturnFormat.JSON:
+        return equalised_df.to_dict(orient='records')
+
+    raise MqValueError(f'Unsupported return_format {return_format}')
+
+
+def get_xstse_portfolio(
+        actual_portfolio_id: str,
+        start_date: dt.date,
+        end_date: dt.date,
+        position_sets: bool = False,
+        return_format: Union[ReturnFormat, None] = ReturnFormat.DATA_FRAME
+) -> Union[Dict, pd.DataFrame, List[PositionSet]]:
+    """
+    Cross-Sectionally Time-Series Equalised clone of an existing GS Marquee
+    portfolio. Extends the XSE logic by **also** fixing *gross* market
+    value (GMV) across the entire horizon while still equal-weighting every
+    active idea on every date.
+
+    :param actual_portfolio_id: the portfolio ID of the actual, starting portfolio that you wish
+    to convert to XSTSE
+    :param start_date: start date, must have valid positions in the actual portfolio
+    :param end_date: end date, must have valid positions in the actual portfolio
+    :param position_sets: whether to return the position sets. Cannot be true if
+    return_format is not None. Defaults to False
+    :param return_format: return format, defaults to a Pandas DataFrame. Cannot be None if
+    position_sets is False
+
+    **Examples**
+
+    >>> xstse_portfolio = get_xstse_portfolio(
+    >>>     actual_portfolio_id='PORTFOLIOID',
+    >>>     start_date=dt.date(2021, 1, 1),
+    >>>     end_date=dt.date(2021, 1, 31)
+    >>> )
+    >>> You get back a pandas DataFrame with the XSTSE portfolio
+
+    >>> xstse_portfolio = get_xstse_portfolio(
+    >>>     actual_portfolio_id='PORTFOLIOID',
+    >>>     start_date=dt.date(2021, 1, 1),
+    >>>     end_date=dt.date(2021, 1, 31),
+    >>>     position_sets=True
+    >>> )
+    >>> You get back a list of position sets that can be uploaded to a new portfolio via the
+    PortfolioManager API
+    """
+    # VALIDATION
+    pm = _validate_portfolio_creation_inputs(actual_portfolio_id, start_date, end_date,
+                                             position_sets, return_format)
+
+    # BUILD XSTSE PORTFOLIO --------------------------------------------------
+    live_df = _pull_constituents_for_date_range(pm, start_date, end_date)
+
+    # 1) equalise weights across *and* through time
+    live_df = _add_ts_equal_weights(live_df)
+
+    # 2) convert weights → integer share counts (same logic as XSE)
+    equalised_df = _generate_equalised_quantities(live_df, weight_col='w_xstse')
+
+    # FORMAT OUTPUT ----------------------------------------------------------
     if position_sets:
         return _build_position_sets(equalised_df)
 
