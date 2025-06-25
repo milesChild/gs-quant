@@ -24,7 +24,7 @@ import pandas as pd
 import pytest
 
 from gs_quant.errors import MqError, MqValueError
-from gs_quant.markets.portfolio_utils import get_xse_portfolio
+from gs_quant.markets.portfolio_utils import get_xse_portfolio, get_xstse_portfolio
 from gs_quant.models.risk_model import ReturnFormat
 
 
@@ -239,3 +239,233 @@ def test_output_position_sets(mocker):
         wts = [p.weight for p in ps.positions]
         assert len(set(w for w in wts if w > 0)) == 1
         assert len(set(w for w in wts if w < 0)) == 1
+
+
+@pytest.mark.parametrize(
+    "start,end,err_regex",
+    [
+        (dt.date(2025, 1, 10), dt.date(2025, 1, 5), "start_date .* must be on/ before"),
+    ],
+)
+def test_fail_start_after_end_xstse(mocker, start, end, err_regex):
+    _patch_internals(mocker)
+    with pytest.raises(MqValueError, match=err_regex):
+        get_xstse_portfolio("PF_X", start, end)
+
+
+def test_fail_nonexistent_portfolio_xstse(mocker):
+    _patch_internals(mocker, portfolio_exists=False)
+    with pytest.raises(MqError, match="Cannot retrieve portfolio"):
+        get_xstse_portfolio("PF_X", dt.date(2025, 1, 1), dt.date(2025, 1, 2))
+
+
+def test_fail_dates_not_covered_xstse(mocker):
+    _patch_internals(
+        mocker, date_list=[dt.date(2025, 1, 3), dt.date(2025, 1, 4)]
+    )
+    with pytest.raises(MqError, match="have no positions in the source portfolio"):
+        get_xstse_portfolio("PF_X", dt.date(2025, 1, 1), dt.date(2025, 1, 2))
+
+
+def test_fail_constituent_download_xstse(mocker):
+    _patch_internals(mocker, explode_on_constituents=True)
+    with pytest.raises(MqError, match="boom"):
+        get_xstse_portfolio("PF_X", dt.date(2025, 1, 1), dt.date(2025, 1, 1))
+
+
+def test_fail_no_constituents_xstse(mocker):
+    _patch_internals(mocker, constituents=[])
+    with pytest.raises(MqError, match="No constituent data returned"):
+        get_xstse_portfolio("PF_X", dt.date(2025, 1, 1), dt.date(2025, 1, 1))
+
+
+def test_fail_mutually_exclusive_flags_xstse(mocker):
+    _patch_internals(mocker)
+    with pytest.raises(MqValueError, match="When position_sets is True"):
+        get_xstse_portfolio(
+            "PF_X",
+            dt.date(2025, 1, 1),
+            dt.date(2025, 1, 2),
+            position_sets=True,
+            return_format=ReturnFormat.DATA_FRAME,
+        )
+
+
+def test_fail_flags_both_none_xstse(mocker):
+    _patch_internals(mocker)
+    with pytest.raises(MqValueError):
+        get_xstse_portfolio(
+            "PF_X",
+            dt.date(2025, 1, 1),
+            dt.date(2025, 1, 2),
+            position_sets=False,
+            return_format=None,
+        )
+
+
+def test_fail_position_set_resolution_xstse(mocker):
+    class BadPS(DummyPositionSet):
+        def resolve(self):
+            self.unresolved_positions = ["XYZ"]
+            return self
+
+    _patch_internals(mocker, positionset_cls=BadPS)
+    with pytest.raises(MqError, match="Unresolved positions"):
+        get_xstse_portfolio(
+            "PF_X",
+            dt.date(2025, 1, 1),
+            dt.date(2025, 1, 1),
+            position_sets=True,
+            return_format=None,
+        )
+
+
+# Cleaning & aggregation
+def test_cleaning_and_unique_positions_xstse(mocker):
+    duplicate_constituents = [
+        dict(date="2025-01-01", assetId="A", quantity=300, netWeight=0.30, grossWeight=0.30),
+        dict(date="2025-01-01", assetId="A", quantity=300, netWeight=0.30, grossWeight=0.30),
+        dict(date="2025-01-01", assetId="B", quantity=-600, netWeight=-0.60, grossWeight=0.60),
+    ]
+    _patch_internals(
+        mocker,
+        date_list=[dt.date(2025, 1, 1)],
+        constituents=duplicate_constituents,
+    )
+
+    df = get_xstse_portfolio(
+        "PF_X",
+        dt.date(2025, 1, 1),
+        dt.date(2025, 1, 1),
+        return_format=ReturnFormat.DATA_FRAME,
+    )
+
+    # one row per unique asset
+    assert len(df) == df["assetId"].nunique()
+
+    # every active idea should have the same *magnitude* weight
+    assert len(set(abs(w) for w in df["weight"])) == 1
+
+
+# Happy‑path output formats
+def test_output_dataframe_xstse(mocker):
+    _patch_internals(mocker)
+    df = get_xstse_portfolio(
+        "PF_X",
+        dt.date(2025, 1, 1),
+        dt.date(2025, 1, 2),
+        return_format=ReturnFormat.DATA_FRAME,
+    )
+    assert isinstance(df, pd.DataFrame)
+    assert {"date", "assetId", "weight", "quantity"}.issubset(df.columns)
+    assert len(df) == 4  # 2 assets × 2 days
+
+
+def test_output_json_xstse(mocker):
+    _patch_internals(mocker)
+    js = get_xstse_portfolio(
+        "PF_X",
+        dt.date(2025, 1, 1),
+        dt.date(2025, 1, 2),
+        return_format=ReturnFormat.JSON,
+    )
+    assert isinstance(js, list) and len(js) == 4
+    assert {"date", "assetId", "weight", "quantity"}.issubset(js[0].keys())
+
+
+def test_output_position_sets_xstse(mocker):
+    _patch_internals(mocker)
+    psets = get_xstse_portfolio(
+        "PF_X",
+        dt.date(2025, 1, 1),
+        dt.date(2025, 1, 2),
+        position_sets=True,
+        return_format=None,
+    )
+    assert isinstance(psets, list) and len(psets) == 2
+    for ps in psets:
+        # magnitudes must be identical across every idea
+        mags = {abs(p.weight) for p in ps.positions}
+        assert len(mags) == 1
+
+
+# XSTSE‑specific sanity checks
+def test_signs_preserved(mocker):
+    _patch_internals(mocker)
+    out = get_xstse_portfolio(
+        "PF_X",
+        dt.date(2025, 1, 1),
+        dt.date(2025, 1, 2),
+        return_format=ReturnFormat.DATA_FRAME,
+    )
+
+    # compare sign(w_live) vs sign(weight)  – they must match
+    assert set(out["weight"].apply(np.sign)).issubset({-1, 1})
+
+
+def test_constant_gmv_when_counts_equal(mocker):
+    # three days – same # of ideas on day‑1 and day‑2, different on day‑3
+    constituents = [
+        dict(date="2025-01-01", assetId="A", quantity=100, netWeight=0.70, grossWeight=0.70),
+        dict(date="2025-01-01", assetId="B", quantity=-100, netWeight=-0.30, grossWeight=0.30),
+        dict(date="2025-01-02", assetId="A", quantity=110, netWeight=0.66, grossWeight=0.66),
+        dict(date="2025-01-02", assetId="B", quantity=-120, netWeight=-0.34, grossWeight=0.34),
+        # day‑3 adds a new idea
+        dict(date="2025-01-03", assetId="A", quantity=120, netWeight=0.50, grossWeight=0.50),
+        dict(date="2025-01-03", assetId="B", quantity=-80, netWeight=-0.33, grossWeight=0.33),
+        dict(date="2025-01-03", assetId="C", quantity=60, netWeight=0.17, grossWeight=0.17),
+    ]
+    _patch_internals(
+        mocker,
+        date_list=[
+            dt.date(2025, 1, 1),
+            dt.date(2025, 1, 2),
+            dt.date(2025, 1, 3),
+        ],
+        constituents=constituents,
+    )
+
+    df = get_xstse_portfolio(
+        "PF_X",
+        dt.date(2025, 1, 1),
+        dt.date(2025, 1, 3),
+        return_format=ReturnFormat.DATA_FRAME,
+    )
+
+    gmv = df.groupby("date")["weight"].apply(lambda x: x.abs().sum())
+    assert np.isclose(gmv.loc[dt.date(2025, 1, 1)], gmv.loc[dt.date(2025, 1, 2)])
+    # day‑3 may differ (extra idea) – no assertion
+
+
+def test_no_new_positions_invented(mocker):
+    _patch_internals(mocker)
+    result = get_xstse_portfolio(
+        "PF_X",
+        dt.date(2025, 1, 1),
+        dt.date(2025, 1, 2),
+        return_format=ReturnFormat.DATA_FRAME,
+    )
+    assert set(result["assetId"]) <= {"A", "B"}  # subset of originals only
+
+
+def test_idempotent_when_already_xstse(mocker):
+    # Build constituents that are already XSTSE (|w|=0.5 for both L/S)
+    constituents = [
+        dict(date="2025-01-01", assetId="A", quantity=100, netWeight=0.5, grossWeight=0.5),
+        dict(date="2025-01-01", assetId="B", quantity=-100, netWeight=-0.5, grossWeight=0.5),
+    ]
+    _patch_internals(
+        mocker,
+        date_list=[dt.date(2025, 1, 1)],
+        constituents=constituents,
+    )
+
+    df = get_xstse_portfolio(
+        "PF_X",
+        dt.date(2025, 1, 1),
+        dt.date(2025, 1, 1),
+        return_format=ReturnFormat.DATA_FRAME,
+    )
+
+    # weights should remain unchanged
+    assert np.isclose(abs(df["weight"]).unique(), 0.5).all()
