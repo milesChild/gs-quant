@@ -50,6 +50,7 @@ def _validate_portfolio_creation_inputs(actual_portfolio_id: str,
     pm = PortfolioManager(actual_portfolio_id)
 
     cal = pm.get_position_dates()
+    print(cal)
     if start not in cal or end not in cal:
         raise MqError('start_date and/or end_date have no positions in the source portfolio')
 
@@ -190,16 +191,17 @@ def _build_position_sets(tidy: pd.DataFrame) -> List[PositionSet]:
     for day, day_df in tidy.groupby('date'):
         positions = [
             Position(asset_id=row.assetId,
+                     identifier=row.assetId,
                      quantity=int(row.quantity),
                      weight=float(row.weight))
             for row in day_df.itertuples(index=False)
         ]
-        ps_out.append(PositionSet(positions, effective_date=day))
+        ps_out.append(PositionSet(positions, date=day))
     # Resolve position sets
     for ps in ps_out:
         ps.resolve()
         if ps.unresolved_positions:
-            raise MqError(f'Unresolved positions on {ps.effective_date}: {ps.unresolved_positions}')
+            raise MqError(f'Unresolved positions on {ps.date}: {ps.unresolved_positions}')
     return ps_out
 
 

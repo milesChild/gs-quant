@@ -30,16 +30,17 @@ from gs_quant.models.risk_model import ReturnFormat
 
 # Stubs for position and position set
 class DummyPosition:
-    def __init__(self, asset_id: str, quantity: int, weight: float):
+    def __init__(self, asset_id: str, quantity: int, weight: float, identifier: str = None):
         self.asset_id = asset_id
         self.quantity = quantity
         self.weight = weight
+        self.identifier = identifier or asset_id
 
 
 class DummyPositionSet:
-    def __init__(self, positions: List[DummyPosition], effective_date: dt.date):
+    def __init__(self, positions: List[DummyPosition], date: dt.date):
         self.positions = positions
-        self.effective_date = effective_date
+        self.date = date
         self.unresolved_positions: List[str] = []
 
     def resolve(self):
