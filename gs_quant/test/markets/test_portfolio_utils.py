@@ -117,7 +117,7 @@ def test_fail_dates_not_covered(mocker):
         mocker,
         date_list=[dt.date(2025, 1, 3), dt.date(2025, 1, 4)],
     )
-    with pytest.raises(MqError, match="have no positions in the source portfolio"):
+    with pytest.raises(MqError, match="is outside available portfolio date range"):
         get_xse_portfolio("PF_X", dt.date(2025, 1, 1), dt.date(2025, 1, 2))
 
 
@@ -131,6 +131,39 @@ def test_fail_no_constituents(mocker):
     _patch_internals(mocker, constituents=[])
     with pytest.raises(MqError, match="No constituent data returned"):
         get_xse_portfolio("PF_X", dt.date(2025, 1, 1), dt.date(2025, 1, 1))
+
+
+def test_fail_start_before_calendar_range(mocker):
+    _patch_internals(
+        mocker,
+        date_list=[dt.date(2025, 1, 10), dt.date(2025, 1, 20)],
+    )
+    with pytest.raises(MqError, match="is outside available portfolio date range"):
+        get_xse_portfolio("PF_X", dt.date(2025, 1, 5), dt.date(2025, 1, 15))
+
+
+def test_fail_end_after_calendar_range(mocker):
+    _patch_internals(
+        mocker,
+        date_list=[dt.date(2025, 1, 10), dt.date(2025, 1, 20)],
+    )
+    with pytest.raises(MqError, match="is outside available portfolio date range"):
+        get_xse_portfolio("PF_X", dt.date(2025, 1, 15), dt.date(2025, 1, 25))
+
+
+def test_success_dates_within_calendar_range(mocker):
+    _patch_internals(
+        mocker,
+        date_list=[dt.date(2025, 1, 10), dt.date(2025, 1, 15), dt.date(2025, 1, 20)],
+    )
+    # Should succeed: requested range [2025-01-12, 2025-01-18] is within [2025-01-10, 2025-01-20]
+    df = get_xse_portfolio(
+        "PF_X",
+        dt.date(2025, 1, 12),
+        dt.date(2025, 1, 18),
+        return_format=ReturnFormat.DATA_FRAME,
+    )
+    assert isinstance(df, pd.DataFrame)
 
 
 def test_fail_mutually_exclusive_flags(mocker):
@@ -264,7 +297,7 @@ def test_fail_dates_not_covered_xstse(mocker):
     _patch_internals(
         mocker, date_list=[dt.date(2025, 1, 3), dt.date(2025, 1, 4)]
     )
-    with pytest.raises(MqError, match="have no positions in the source portfolio"):
+    with pytest.raises(MqError, match="is outside available portfolio date range"):
         get_xstse_portfolio("PF_X", dt.date(2025, 1, 1), dt.date(2025, 1, 2))
 
 
@@ -278,6 +311,30 @@ def test_fail_no_constituents_xstse(mocker):
     _patch_internals(mocker, constituents=[])
     with pytest.raises(MqError, match="No constituent data returned"):
         get_xstse_portfolio("PF_X", dt.date(2025, 1, 1), dt.date(2025, 1, 1))
+
+
+def test_fail_start_before_calendar_range_xstse(mocker):
+    _patch_internals(
+        mocker,
+        date_list=[dt.date(2025, 1, 10), dt.date(2025, 1, 20)],
+    )
+    with pytest.raises(MqError, match="is outside available portfolio date range"):
+        get_xstse_portfolio("PF_X", dt.date(2025, 1, 5), dt.date(2025, 1, 15))
+
+
+def test_success_dates_within_calendar_range_xstse(mocker):
+    _patch_internals(
+        mocker,
+        date_list=[dt.date(2025, 1, 10), dt.date(2025, 1, 15), dt.date(2025, 1, 20)],
+    )
+    # Should succeed: requested range [2025-01-12, 2025-01-18] is within [2025-01-10, 2025-01-20]
+    df = get_xstse_portfolio(
+        "PF_X",
+        dt.date(2025, 1, 12),
+        dt.date(2025, 1, 18),
+        return_format=ReturnFormat.DATA_FRAME,
+    )
+    assert isinstance(df, pd.DataFrame)
 
 
 def test_fail_mutually_exclusive_flags_xstse(mocker):

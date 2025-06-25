@@ -50,9 +50,13 @@ def _validate_portfolio_creation_inputs(actual_portfolio_id: str,
     pm = PortfolioManager(actual_portfolio_id)
 
     cal = pm.get_position_dates()
-    print(cal)
-    if start not in cal or end not in cal:
-        raise MqError('start_date and/or end_date have no positions in the source portfolio')
+    if not cal:
+        raise MqError('No position dates available in the source portfolio')
+
+    cal_start, cal_end = min(cal), max(cal)
+    if start < cal_start or end > cal_end:
+        raise MqError(
+            f'Requested date range [{start}, {end}] is outside available portfolio date range [{cal_start}, {cal_end}]')
 
     return pm
 
